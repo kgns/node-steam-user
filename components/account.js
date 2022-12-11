@@ -39,7 +39,7 @@ class SteamUserAccount extends SteamUserLogon {
 
 				if (!body.is_steamguard_enabled) {
 					res.canTrade = false; // SG is not enabled
-				} else if (!body.timestamp_steamguard_enabled || Math.floor(Date.now() / 1000) - body.timestamp_steamguard_enabled < (60 * 60 * 24 * 15)) {
+				} else if (Math.floor(Date.now() / 1000) - body.timestamp_steamguard_enabled < (60 * 60 * 24 * 15)) {
 					res.canTrade = false; // SG has not been enabled for 15 days
 				} else if (
 					!hasHadTwoFactorForWeek &&
