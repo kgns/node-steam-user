@@ -60,7 +60,7 @@ class SteamUserConnection extends SteamUserEnums {
 		}
 
 		if (this.options.httpProxy) {
-			return StdLib.HTTP.getProxyAgent(true, this.options.httpProxy);
+			return StdLib.HTTP.getProxyAgent(true, this.options.httpProxy, this.options.proxyTimeout || 5000);
 		}
 
 		return undefined;
