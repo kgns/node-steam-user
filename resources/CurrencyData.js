@@ -24,7 +24,7 @@ CurrencyData[ECurrencyCode.CAD] = {"prepend": "CDN$ "};
 CurrencyData[ECurrencyCode.AUD] = {"prepend": "A$ "};
 CurrencyData[ECurrencyCode.NZD] = {"prepend": "NZ$ "};
 CurrencyData[ECurrencyCode.CNY] = {"append": " CNY"};
-CurrencyData[ECurrencyCode.INR] = {"append": " INR"};
+CurrencyData[ECurrencyCode.INR] = {"prepend": "\u20b9 "};
 CurrencyData[ECurrencyCode.CLP] = {"append": " CLP"};
 CurrencyData[ECurrencyCode.PEN] = {"append": " PEN"};
 CurrencyData[ECurrencyCode.COP] = {"append": " COP"};
@@ -33,6 +33,6 @@ CurrencyData[ECurrencyCode.HKD] = {"append": " HKD"};
 CurrencyData[ECurrencyCode.TWD] = {"append": " TWD"};
 CurrencyData[ECurrencyCode.SAR] = {"append": " SAR"};
 CurrencyData[ECurrencyCode.AED] = {"append": " AED"};
-CurrencyData[ECurrencyCode.ARS] = {"prepend": "Arg$ "};
+CurrencyData[ECurrencyCode.ARS] = {"prepend": "ARS$ "};
 
 module.exports = CurrencyData;
