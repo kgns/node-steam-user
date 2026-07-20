@@ -1,21 +1,16 @@
-const AdmZip = require('adm-zip');
-const ByteBuffer = require('bytebuffer');
 const FS = require('fs');
-const LZMA = require('lzma');
 const StdLib = require('@doctormckay/stdlib');
 const SteamCrypto = require('@doctormckay/steam-crypto');
 
 const Helpers = require('./helpers.js');
 const ContentManifest = require('./content_manifest.js');
+const CdnCompression = require('./cdn_compression.js');
 
 const EDepotFileFlag = require('../enums/EDepotFileFlag.js');
 const EMsg = require('../enums/EMsg.js');
 const EResult = require('../enums/EResult.js');
 
 const SteamUserApps = require('./apps.js');
-
-const VZIP_HEADER = 0x5A56;
-const VZIP_FOOTER = 0x767A;
 
 class SteamUserCDN extends SteamUserApps {
 	/**
@@ -113,19 +108,19 @@ class SteamUserCDN extends SteamUserApps {
 			let filename = `depot_key_${appID}_${depotID}.bin`;
 			let file = await this._readFile(filename);
 			if (file && file.length > 4 && Math.floor(Date.now() / 1000) - file.readUInt32LE(0) < (60 * 60 * 24 * 14)) {
-				return resolve({"key": file.slice(4)});
+				return resolve({key: file.slice(4)});
 			}
 
 			this._send(EMsg.ClientGetDepotDecryptionKey, {
-				"depot_id": depotID,
-				"app_id": appID
+				depot_id: depotID,
+				app_id: appID
 			}, async (body) => {
 				if (body.eresult != EResult.OK) {
 					return reject(Helpers.eresultError(body.eresult));
 				}
 
 				if (body.depot_id != depotID) {
-					return reject(new Error("Did not receive decryption key for correct depot"));
+					return reject(new Error('Did not receive decryption key for correct depot'));
 				}
 
 				let key = body.depot_encryption_key;
@@ -180,6 +175,15 @@ class SteamUserCDN extends SteamUserApps {
 	 * @return Promise
 	 */
 	getManifest(appID, depotID, manifestID, branchName, branchPassword, callback) {
+		if (typeof manifestID == 'object' && typeof manifestID.gid == 'string') {
+			// At some point, Valve changed the format of appinfo.
+			// Previously, appinfo.depots[depotId].manifests.public would get you the public manifest ID.
+			// Now, you need to access it with appinfo.depots[depotId].manifests.public.gid.
+			// Here's a shim to keep consumers working properly if they expect the old format.
+			manifestID = manifestID.gid;
+			this._warn(`appinfo format has changed: you now need to use appinfo.depots[${depotID}].manifests.${branchName || 'public'}.gid to access the manifest ID. steam-user is fixing up your input, but you should update your code to retrieve the manifest ID from its new location in the appinfo structure.`);
+		}
+
 		if (typeof branchName == 'function') {
 			callback = branchName;
 			branchName = null;
@@ -256,7 +260,7 @@ class SteamUserCDN extends SteamUserApps {
 				}
 
 				try {
-					let manifest = await unzip(res.data);
+					let manifest = await CdnCompression.unzip(res.data);
 					return resolve({manifest});
 				} catch (ex) {
 					return reject(ex);
@@ -340,7 +344,7 @@ class SteamUserCDN extends SteamUserApps {
 				}
 
 				try {
-					let result = await unzip(SteamCrypto.symmetricDecrypt(res.data, key));
+					let result = await CdnCompression.unzip(SteamCrypto.symmetricDecrypt(res.data, key));
 					if (StdLib.Hashing.sha1(result) != chunkSha1) {
 						return reject(new Error('Checksum mismatch'));
 					}
@@ -374,7 +378,7 @@ class SteamUserCDN extends SteamUserApps {
 
 			let numWorkers = 4;
 
-			fileManifest.size = parseInt(fileManifest.size, 10);
+			let fileSize = parseInt(fileManifest.size, 10);
 			let bytesDownloaded = 0;
 
 			let {servers: availableServers} = await this.getContentServers(appID);
@@ -399,7 +403,7 @@ class SteamUserCDN extends SteamUserApps {
 						}
 
 						outputFd = fd;
-						FS.ftruncate(outputFd, parseInt(fileManifest.size, 10), (err) => {
+						FS.ftruncate(outputFd, fileSize, (err) => {
 							if (err) {
 								FS.closeSync(outputFd);
 								return reject(err);
@@ -410,13 +414,14 @@ class SteamUserCDN extends SteamUserApps {
 					});
 				});
 			} else {
-				downloadBuffer = Buffer.alloc(parseInt(fileManifest.size, 10));
+				downloadBuffer = Buffer.alloc(fileSize);
 			}
 
 			let self = this;
 			let queue = new StdLib.DataStructures.AsyncQueue(function dlChunk(chunk, cb) {
 				let serverIdx;
 
+				// eslint-disable-next-line
 				while (true) {
 					// Find the next available download slot
 					if (serversInUse[currentServerIdx]) {
@@ -457,7 +462,7 @@ class SteamUserCDN extends SteamUserApps {
 						callback(null, {
 							type: 'progress',
 							bytesDownloaded,
-							totalSizeBytes: fileManifest.size
+							totalSizeBytes: fileSize
 						});
 					}
 
@@ -492,6 +497,11 @@ class SteamUserCDN extends SteamUserApps {
 							return reject(err);
 						}
 
+						if (fileSize === 0) {
+							// Steam uses a hash of all 0s if the file is empty, which won't validate properly
+							return resolve({type: 'complete'});
+						}
+
 						// File closed. Now re-open it so we can hash it!
 						hash = require('crypto').createHash('sha1');
 						FS.createReadStream(outputFilePath).pipe(hash);
@@ -511,7 +521,7 @@ class SteamUserCDN extends SteamUserApps {
 						});
 					});
 				} else {
-					if (StdLib.Hashing.sha1(downloadBuffer) != fileManifest.sha_content) {
+					if (fileSize > 0 && StdLib.Hashing.sha1(downloadBuffer) != fileManifest.sha_content) {
 						return reject(new Error('File checksum mismatch'));
 					}
 
@@ -521,6 +531,11 @@ class SteamUserCDN extends SteamUserApps {
 					});
 				}
 			};
+
+			if (fileSize === 0) {
+				// nothing to download, so manually trigger the queue drain method
+				queue.drain();
+			}
 
 			function assignServer(idx) {
 				servers[idx] = availableServers.splice(Math.floor(Math.random() * availableServers.length), 1)[0];
@@ -569,8 +584,22 @@ function download(url, hostHeader, destinationFilename, callback) {
 		destinationFilename = null;
 	}
 
+	let timeout = null;
+	let ended = false;
+	let resetTimeout = () => {
+		clearTimeout(timeout);
+		timeout = setTimeout(() => {
+			if (ended) {
+				return;
+			}
+
+			ended = true;
+			callback(new Error('Request timed out'));
+		}, 10000);
+	};
+
 	let options = require('url').parse(url);
-	options.method = "GET";
+	options.method = 'GET';
 	options.headers = {
 		Host: hostHeader,
 		Accept: 'text/html,*/*;q=0.9',
@@ -581,8 +610,13 @@ function download(url, hostHeader, destinationFilename, callback) {
 
 	let module = options.protocol.replace(':', '');
 	let req = require(module).request(options, (res) => {
+		if (ended) {
+			return;
+		}
+
 		if (res.statusCode != 200) {
-			callback(new Error("HTTP error " + res.statusCode));
+			ended = true;
+			callback(new Error('HTTP error ' + res.statusCode));
 			return;
 		}
 
@@ -604,6 +638,12 @@ function download(url, hostHeader, destinationFilename, callback) {
 		}
 
 		stream.on('data', (chunk) => {
+			if (ended) {
+				return;
+			}
+
+			resetTimeout();
+
 			if (typeof chunk === 'string') {
 				chunk = Buffer.from(chunk, 'binary');
 			}
@@ -614,74 +654,30 @@ function download(url, hostHeader, destinationFilename, callback) {
 				dataBuffer = Buffer.concat([dataBuffer, chunk]);
 			}
 
-			callback(null, {"type": "progress", "receivedBytes": receivedBytes, "totalSizeBytes": totalSizeBytes});
+			callback(null, {type: 'progress', receivedBytes: receivedBytes, totalSizeBytes: totalSizeBytes});
 		});
 
 		stream.on('end', () => {
-			callback(null, {"type": "complete", "data": dataBuffer});
+			if (ended) {
+				return;
+			}
+
+			ended = true;
+			callback(null, {type: 'complete', data: dataBuffer});
 		});
 	});
 
 	req.on('error', (err) => {
+		if (ended) {
+			return;
+		}
+
+		ended = true;
 		callback(err);
 	});
 
 	req.end();
-}
-
-function unzip(data) {
-	return new Promise((resolve, reject) => {
-		// VZip or zip?
-		if (data.readUInt16LE(0) != VZIP_HEADER) {
-			// Standard zip
-			let unzip = new AdmZip(data);
-			return resolve(unzip.readFile(unzip.getEntries()[0]));
-		} else {
-			// VZip
-			data = ByteBuffer.wrap(data, ByteBuffer.LITTLE_ENDIAN);
-
-			data.skip(2); // header
-			if (String.fromCharCode(data.readByte()) != 'a') {
-				return reject(new Error("Expected VZip version 'a'"));
-			}
-
-			data.skip(4); // either a timestamp or a CRC; either way, forget it
-			let properties = data.slice(data.offset, data.offset + 5).toBuffer();
-			data.skip(5);
-
-			let compressedData = data.slice(data.offset, data.limit - 10);
-			data.skip(compressedData.remaining());
-
-			let decompressedCrc = data.readUint32();
-			let decompressedSize = data.readUint32();
-			if (data.readUint16() != VZIP_FOOTER) {
-				return reject(new Error("Didn't see expected VZip footer"));
-			}
-
-			let uncompressedSizeBuffer = Buffer.alloc(8);
-			uncompressedSizeBuffer.writeUInt32LE(decompressedSize, 0);
-			uncompressedSizeBuffer.writeUInt32LE(0, 4);
-
-			LZMA.decompress(Buffer.concat([properties, uncompressedSizeBuffer, compressedData.toBuffer()]), (result, err) => {
-				if (err) {
-					return reject(err);
-				}
-
-				result = Buffer.from(result); // it's a byte array
-
-				// Verify the result
-				if (decompressedSize != result.length) {
-					return reject(new Error("Decompressed size was not valid"));
-				}
-
-				if (StdLib.Hashing.crc32(result) != decompressedCrc) {
-					return reject(new Error("CRC check failed on decompressed data"));
-				}
-
-				return resolve(result);
-			});
-		}
-	});
+	resetTimeout();
 }
 
 module.exports = SteamUserCDN;
